@@ -1,0 +1,52 @@
+name: Cleanup GitHub Storage
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      keep_runs:
+        description: Number of completed workflow runs to retain
+        required: false
+        default: "20"
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            for (const artifact of artifacts) {
+              if (Date.parse(artifact.created_at) < cutoff) await github.rest.actions.deleteArtifact({ owner: context.repo.owner, repo: context.repo.repo, artifact_id: artifact.id });
+      - uses: actions/github-script@v9
+        env:
+          KEEP_RUNS: ${{ inputs.keep_runs || '20' }}
+        with:
+          script: |
+            const keepRuns = Number(process.env.KEEP_RUNS);
+            if (!Number.isInteger(keepRuns) || keepRuns < 1) {
+              core.setFailed("keep_runs must be a positive integer");
+              return;
+            }
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              status: "completed",
+              per_page: 100,
+            });
+            runs.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+            for (const run of runs.slice(keepRuns)) {
+              await github.rest.actions.deleteWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              });
+            }
