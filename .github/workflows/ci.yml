@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig fmt --check build.zig src
+      - run: zig build test -Dtarget=x86_64-linux-gnu
+      - run: zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        with:
+          name: daylog-${{ github.sha }}
+          path: zig-out/bin/daylog
+          retention-days: 7
