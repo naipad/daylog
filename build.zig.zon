@@ -1,0 +1,25 @@
+.{
+    .name = .daylog,
+    .version = "0.0.1",
+    .dependencies = .{
+        .zqlite = .{
+            .url = "https://github.com/karlseguin/zqlite.zig/archive/refs/heads/master.tar.gz",
+            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+        },
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig?ref=master#9b14af98fde5e98abb9a8376fe02b42003e835bf",
+            .hash = "httpz-0.0.0-PNVzrMgTCQDhzfBLRRebTx9LU056Ph2erdN9-42rFbhj",
+        },
+        .ztl = .{
+            .url = "https://github.com/karlseguin/ztl/archive/refs/heads/master.tar.gz",
+            .hash = "ztl-0.0.0-XMYgXFcdBQAlVCTnNxQwUmKOf7Uqkw-B1xSkns62dhqo",
+        },
+        .akane_embed = .{
+            .url = "https://github.com/naipad/akane-embed/archive/refs/heads/main.tar.gz",
+            .hash = "akane_embed-0.0.1--KjTAtImAAAMGd3mRtWjbgXfZ8TfIQth8GfAZBH_D_aK",
+        },
+    },
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0xe0bcecd3c95ecae8,
+}
