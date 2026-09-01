@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to rebuild, for example v0.1.0 or Snapshot-2608291904
+        required: true
+        type: string
+  workflow_run:
+    workflows: ["Publish Snapshot"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    name: Verify Release Source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha) || github.ref }}
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Validate release tag source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ] && [ "${{ github.event_name }}" = "workflow_run" ]; then tag="Snapshot"; fi
+          if [ -z "$tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          if [[ "$tag" = v* ]]; then
+            git fetch origin main
+            commit="$(git rev-parse "${tag}^{commit}")"
+            git merge-base --is-ancestor "$commit" origin/main || {
+              echo "Formal release tag $tag must reference a commit reachable from main." >&2
+              exit 1
+            }
+          fi
+
+      - name: Run tests
+        run: zig build test -Dtarget=x86_64-linux-gnu
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: verify
+    if: needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            target: x86_64-linux-gnu
+          - name: linux-arm64
+            target: aarch64-linux-gnu
+          - name: windows-amd64
+            target: x86_64-windows-gnu
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha) || github.ref }}
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          cache-key: release-${{ matrix.name }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ] && [ "${{ github.event_name }}" = "workflow_run" ]; then tag="Snapshot"; fi
+          if [ -z "$tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*|Snapshot) ;;
+            *) echo "Invalid release tag: $tag" >&2; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -p release
+
+      - name: Package release binary
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "$PLATFORM" = "windows-amd64" ]; then
+            cp release/bin/daylog.exe "dist/daylog-${PLATFORM}.exe"
+          else
+            cp release/bin/daylog "dist/daylog-${PLATFORM}"
+          fi
+          sha256sum dist/daylog-${PLATFORM}* > "dist/daylog-${PLATFORM}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha) || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve release tag
+        id: version
+        shell: bash
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ] && [ "${{ github.event_name }}" = "workflow_run" ]; then
+            tag="Snapshot"
+          fi
+          if [ -z "$tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build checksums manifest
+        working-directory: dist
+        run: cat *.sha256 | sort > checksums.txt
+
+      - name: Remove existing release for this tag
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            for (const release of releases.filter((item) => item.tag_name === process.env.RELEASE_TAG)) {
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+              });
+              core.info(`Deleted existing release ${release.tag_name}.`);
+            }
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(steps.version.outputs.tag, 'Snapshot') && 'Snapshot' || steps.version.outputs.tag }}
+          name: ${{ startsWith(steps.version.outputs.tag, 'Snapshot') && 'Snapshot' || steps.version.outputs.tag }}
+          body: "${{ startsWith(steps.version.outputs.tag, 'Snapshot') && 'Latest snapshot build' || format('Release tag: {0}', steps.version.outputs.tag) }}"
+          generate_release_notes: ${{ !startsWith(steps.version.outputs.tag, 'Snapshot') }}
+          prerelease: ${{ startsWith(steps.version.outputs.tag, 'Snapshot') }}
+          make_latest: ${{ !startsWith(steps.version.outputs.tag, 'Snapshot') }}
+          files: |
+            dist/daylog-linux-amd64
+            dist/daylog-linux-arm64
+            dist/daylog-windows-amd64.exe
+            dist/*.sha256
+            dist/checksums.txt
+
+  cleanup-old-releases:
+    name: Keep Latest Stable and Snapshot Releases
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const stable = releases
+              .filter((release) => /^v\d+\.\d+\.\d+$/.test(release.tag_name))
+              .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+            const keepReleaseIds = new Set([
+              stable[0]?.id,
+              releases.find((release) => release.tag_name === "Snapshot")?.id,
+            ]);
+            for (const release of releases.filter((release) => !keepReleaseIds.has(release.id))) {
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+              });
+              core.info(`Deleted old release ${release.tag_name}.`);
+            }
+
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const stableTags = tags
+              .map((tag) => tag.name)
+              .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag))
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+            const keepTagNames = new Set(["Snapshot", stableTags[0]]);
+            for (const tag of tags.map((tag) => tag.name).filter((tag) => !keepTagNames.has(tag))) {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+              core.info(`Deleted old tag ${tag}.`);
+            }
